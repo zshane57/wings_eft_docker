@@ -66,7 +66,7 @@ contours CSV  →  EFD (10 harmonics, Momocs)  →  scale/rotate/phase normalisa
 
 | File | Purpose |
 |---|---|
-| `identify_wing.sh` / `identify_wing.ps1` | Interactive launchers (bash for macOS/Linux, PowerShell for Windows) — prompt for input, build, run, then remove the container + image |
+| `identify_wing.sh` / `identify_wing.ps1` | Interactive launchers (bash for macOS,Linux / PowerShell for Windows) — prompt for input, build, run, then remove the container + image |
 | `Dockerfile.workflow` | Image definition (ubuntu:22.04, R, Momocs 1.5.0, GUIDE Ubuntu22 binary) |
 | `run_workflow.sh` | Entrypoint — orchestrates Tasks 2–5 and reports the prediction |
 | `process_features.R` | EFD → normalisation → LDA → full GUIDE data file |
