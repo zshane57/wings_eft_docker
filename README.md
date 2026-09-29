@@ -11,14 +11,13 @@ contours CSV  →  EFD (10 harmonics, Momocs)  →  scale/rotate/phase normalisa
 
 ## Before you start
 
-1. **Install Docker** on your machine in advance — this workflow runs
-   everything inside a Docker container
-   (e.g. Docker Desktop: https://www.docker.com/products/docker-desktop/).
+1. **Install Docker** on your machine in advance
+   [Install Docker Desktop](https://www.docker.com/products/docker-desktop/).
 2. **Extract the wing contour coordinates** of your sample using the Google
-   Colab notebook **`flieswings_proj.ipynb`**: <https://github.com/zshane57/wings_eft_docker/blob/main/flieswings_proj.ipynb>
+   Colab notebook [**`flieswings_proj.ipynb`**](https://github.com/zshane57/wings_eft_docker/blob/main/flieswings_proj.ipynb)
    the notebook exports a `contours_coordinates*.csv` file (columns:
    `dm_x`, `dm_y`, `pa2r_x`, `pa2r_y`). Place the exported CSV into this
-   directory before running the workflow.
+   directory before running the workflow. Please create an account on [Hugging Face](https://huggingface.co/join) and get an API key to use [SAM3 model](https://huggingface.co/facebook/sam3) in the notebook.
 
 ## Opening the workflow on your platform
 
