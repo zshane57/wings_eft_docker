@@ -1,0 +1,49 @@
+# --------------------------------------------------------------
+# VARIANT: SAM3 segmentation using the OFFICIAL GITHUB
+# implementation (facebookresearch/sam3) instead of the Hugging
+# Face transformers port. Point prompts on images work through the
+# "instance interactivity" (SAM1/SAM2-style) predictor.
+#
+# The checkpoint (sam3.pt) is still downloaded at runtime from the
+# SAME gated Hugging Face repo (facebook/sam3) — the HF_TOKEN
+# environment variable and prior access approval are required.
+# Mount the HF cache as a named volume so the weights survive image
+# removal:
+#   -v flywing-sam3-cache:/root/.cache/huggingface
+#
+# Build (this variant installs the sam3 package from a source
+# tarball already present in the build context — fetch it with:
+#   curl -sL https://github.com/facebookresearch/sam3/archive/refs/heads/main.tar.gz \
+#        -o sam3-main.tar.gz
+# — or replace the tarball install with:
+#   apt-get update && apt-get install -y git && \
+#   pip install --no-cache-dir git+https://github.com/facebookresearch/sam3.git
+# ):
+#   docker build -f Dockerfile.segment_github -t flywing-segment-github .
+# --------------------------------------------------------------
+
+FROM python:3.12-slim
+
+# ---- CPU-only PyTorch + the sam3 package + image stack -----------------------
+COPY sam3-main.tar.gz /tmp/sam3-main.tar.gz
+RUN pip install --no-cache-dir torch torchvision \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir /tmp/sam3-main.tar.gz \
+        einops hydra-core omegaconf triton \
+        pycocotools torchmetrics scipy psutil \
+        opencv-python-headless pillow pandas \
+    && rm /tmp/sam3-main.tar.gz
+
+# ---- CPU-only patch (documented): upstream precomputes position-encoding
+# caches and decoder caches on a hardcoded device="cuda" (the README targets
+# torch cu128 GPU installs). Patch those construction-time constants to CPU
+# for the CPU-only benchmark build.
+RUN sed -i 's/device="cuda"/device="cpu"/g' \
+        /usr/local/lib/python3.12/site-packages/sam3/model/position_encoding.py \
+        /usr/local/lib/python3.12/site-packages/sam3/model/decoder.py
+
+WORKDIR /work
+
+COPY segment_wing_github.py /app/segment_wing_github.py
+
+ENTRYPOINT ["python3", "/app/segment_wing_github.py"]

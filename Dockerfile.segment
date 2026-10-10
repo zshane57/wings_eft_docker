@@ -1,0 +1,34 @@
+# --------------------------------------------------------------
+# Forensic Fly Wing Species Classification — Segmentation image
+# SAM3 wing-cell segmentation (point prompts -> contours CSV),
+# the desktop/Docker port of the Colab notebook.
+#
+# CPU-only PyTorch keeps the image small (~2 GB instead of ~6 GB);
+# the model weights (3.44 GB, gated) are downloaded on first run
+# into the HF cache — mount it as a named volume so it survives
+# image cleanup:
+#   -v flywing-sam3-cache:/root/.cache/huggingface
+# Pass the Hugging Face token at runtime:  -e HF_TOKEN=hf_xxx
+#
+# Build (native on the host platform — fast on Apple Silicon,
+# no emulation needed for this image):
+#   docker build -f Dockerfile.segment -t flywing-segment .
+#
+# Run:
+#   docker run --rm -v "$PWD":/work -e HF_TOKEN=hf_xxx \
+#       -v flywing-sam3-cache:/root/.cache/huggingface flywing-segment \
+#       wing.png --points points.json
+# --------------------------------------------------------------
+
+FROM python:3.11-slim
+
+# ---- CPU-only PyTorch + SAM3 stack ------------------------------------------
+RUN pip install --no-cache-dir torch torchvision \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir transformers opencv-python-headless pillow pandas
+
+WORKDIR /work
+
+COPY segment_wing.py /app/segment_wing.py
+
+ENTRYPOINT ["python3", "/app/segment_wing.py"]

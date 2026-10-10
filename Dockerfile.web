@@ -1,0 +1,45 @@
+# --------------------------------------------------------------
+# Dockerfile.web — browser frontend for the fly wing pipeline.
+#
+# A small Flask server that serves the HTML page and drives the two
+# workflow images through the host's Docker daemon (docker CLI +
+# mounted docker.sock). Starts with:
+#
+#   docker build -f Dockerfile.web -t flywing-web .
+#   docker run --rm -d --name flywing-web \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v "<this package dir>:/app/work" \
+#     -e WORK_HOST_PATH="<this package dir>" \
+#     -p 127.0.0.1:8080:8080 flywing-web
+#
+# then open  http://localhost:8080
+#
+# (start_web.sh / start_web.ps1 do exactly this and open the browser.)
+# --------------------------------------------------------------
+
+FROM python:3.11-slim
+
+# ---- Docker CLI (talks to the host daemon via the mounted socket) ------------
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        ca-certificates curl gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) \
+signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian \
+$(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update -qq && apt-get install -y -qq docker-ce-cli \
+    && apt-get purge -y -qq gnupg && apt-get autoremove -y -qq \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir flask
+
+WORKDIR /app
+COPY gui_logic.py webserver.py /app/
+COPY templates/ /app/templates/
+
+ENV PORT=8080
+EXPOSE 8080
+CMD ["python3", "/app/webserver.py"]
