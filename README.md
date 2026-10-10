@@ -1,138 +1,220 @@
-# Fly Wing Species Identification — Docker Workflow
+# Fly Wing Species Identification — Docker Workflow (full pipeline)
 
-Self-contained deployment of the full pipeline (flywingproj.md Tasks 2–5):
+Self-contained deployment of the complete pipeline — segmentation **and**
+classification — in two chained Docker containers, driven by one GUI wizard
+or one CLI launcher:
 
 ```
-contours CSV  →  EFD (10 harmonics, Momocs)  →  scale/rotate/phase normalisation
-              →  traversal-direction canonicalisation  →  fold-1 LDA projection (24 features)
-              →  full GUIDE data file (train on top, test below, new sample last, weight 0)
-              →  GUIDE random forest  →  predicted species + probability
+wing photo  →  SAM3 segmentation (point prompts)  →  contour CSV
+            →  EFD (10 harmonics, Momocs)  →  scale/rotate/phase normalisation
+            →  traversal-direction canonicalisation  →  fold-1 LDA projection (24 features)
+            →  full GUIDE data file  →  GUIDE random forest  →  species + probability
 ```
+
+Have contours already (from the Colab notebook `flieswings_proj.ipynb`)?
+Skip the segmentation stage: classify the CSV directly (GUI mode 2).
 
 ## Before you start
 
-1. **Install Docker** on your machine in advance
-   [Install Docker Desktop](https://www.docker.com/products/docker-desktop/).
-2. **Extract the wing contour coordinates** of your sample using the Google
-   Colab notebook [**`flieswings_proj.ipynb`**](https://github.com/zshane57/wings_eft_docker/blob/main/flieswings_proj.ipynb)
-   the notebook exports a `contours_coordinates*.csv` file (columns:
-   `dm_x`, `dm_y`, `pa2r_x`, `pa2r_y`). Place the exported CSV into this
-   directory before running the workflow. Please create an account on [Hugging Face](https://huggingface.co/join) and get an API key to use [SAM3 model](https://huggingface.co/facebook/sam3) in the notebook.
+1. **Install Docker** — https://www.docker.com/products/docker-desktop/
+   (or Docker Engine on Linux).
+2. **For the segmentation stage only:** a **Hugging Face token**.
+   SAM3's weights are hosted on a gated repository:
+   - request access at **https://huggingface.co/facebook/sam3**
+     (a short form; approval is usually quick),
+   - create a read token at **https://huggingface.co/settings/tokens**.
 
-## Opening the workflow on your platform
+   The token is passed to the container via an environment variable only —
+   it is never written to disk by this workflow. The first segmentation run
+   downloads **~3.4 GB of weights once** into the `flywing-sam3-cache` Docker
+   volume; after that, later runs work even without the token.
+3. **For classification only:** export the contour CSV from the Google Colab
+   notebook **`flieswings_proj.ipynb`** <!-- ADD NOTEBOOK LINK HERE --> and
+   place it in this directory (columns `dm_x, dm_y, pa2r_x, pa2r_y`).
 
-**Windows (x86_64)**
-1. Open **PowerShell**.
-2. Navigate to this folder and start the launcher:
+## Graphical wizard (easiest way to run)
 
-       cd path\to\docker_workflow
-       powershell -ExecutionPolicy Bypass -File .\identify_wing.ps1
+`identify_gui.py` (Python 3.8+ with tkinter; pillow optional but recommended
+for JPEG photos and smoother scaling):
 
-   (The `-ExecutionPolicy Bypass` switch is only needed if Windows blocks
-   script execution; if execution is already allowed, `.\identify_wing.ps1`
-   alone works.) No emulation is needed — the container runs natively on
-   x86_64 Windows. The bash launcher `identify_wing.sh` remains available
-   for WSL / Git Bash users.
+- **macOS:** `python3 identify_gui.py` — Apple's bundled `python3` lacks
+  tkinter; use the python.org installer or `brew install python-tk`
+- **Windows:** `py identify_gui.py` (the python.org installer includes tkinter)
+- **Linux:** `sudo apt install python3 python3-tk`, then `python3 identify_gui.py`
 
-**macOS (Apple Silicon and Intel)**
-1. Open **Terminal**.
-2. Navigate to this folder and start the launcher:
+### Mode 1 — Segment a wing photo, then identify it
 
-       cd path/to/docker_workflow
-       ./identify_wing.sh
+1. Browse for the wing photo (PNG/JPEG).
+2. Paste your Hugging Face token into the masked field (needed only for the
+   first download).
+3. Click **"Click on the photo…"** — the photo opens in a window; per wing
+   cell (pa2r first, then dm) click **1 point inside the cell (green)** and
+   **2 points outside it (red, excluding the neighbouring cells)**. Undo and
+   reset buttons are available; the coordinate mapping is automatic.
+4. Optionally pick the species (for validation) or leave it unknown.
+5. Click **Segment & Identify** — the SAM3 container runs, produces the
+   contour CSV, and classification starts automatically. The log pane
+   streams everything; the result panel shows the prediction.
 
-   Apple Silicon is detected automatically and the x86_64 image runs through
-   emulation (enable *Rosetta* in Docker Desktop for best speed); on Intel
-   Macs everything runs natively.
+Quality check: the segmentation container also writes `masks_<photo>/` —
+two PNGs showing the segmented cells in white. For a proper check run
+`qc_masks.py` (below), and/or open the generated `qc_overlay_*.png`
+files — the yellow SAM3 boundary should trace the cell cleanly; prompt
+points appear as green (inside) / red (outside) dots. If a mask looks
+wrong, redo the run with better-placed points.
 
-**Linux (x86_64)**
-1. Install **Docker Engine** (via your distribution's package manager or
-   https://docs.docker.com/engine/install/) and add your user to the docker
-   group so docker works without sudo (log out and back in afterwards):
+### Mode 2 — Classify an existing contour CSV
 
-       sudo usermod -aG docker $USER
+The original behaviour: browse for a `contours_coordinates*.csv`, optionally
+pick the species, click **Identify`.
 
-2. Open a terminal, navigate to this folder and start the launcher — the
-   same script as on macOS, no changes needed:
+## Web frontend (browser — no Python on the host needed)
 
-       cd path/to/docker_workflow
-       ./identify_wing.sh
+`start_web.sh` (macOS/Linux) or `start_web.ps1` (Windows) builds a small
+Flask container (~325 MB) and opens the workflow in your browser:
 
-   x86_64 Linux is the most native environment of all: the container runs
-   directly on the host kernel with no VM and no emulation.
+    ./start_web.sh        # or:  powershell -ExecutionPolicy Bypass -File .\start_web.ps1
+    → http://localhost:8080
+
+The page offers the same two modes as the desktop wizard:
+
+- **Segment a wing photo, then identify it** — upload the photo, click the
+  6 prompt points directly on the image (green inside + 2 red outside,
+  per cell, with undo/reset), optionally paste the HF token (needed only
+  for the first weights download), pick the species, and press **Run**.
+  The log streams live; when the run finishes the result card shows the
+  prediction together with the **QC overlay images** (yellow = SAM3
+  boundary) and download links for the contour CSV.
+- **Classify an existing contour CSV** — upload a `contours_coordinates*.csv`
+  and run.
+
+The server drives the same Docker images as the other frontends, binds to
+**localhost only**, passes the token to the container as an environment
+variable (never writes it to disk), and removes the workflow containers
+and images after each run. It keeps running until you stop it:
+
+    docker rm -f flywing-web
+
+Requires Docker Desktop or any Docker Engine with the standard
+`/var/run/docker.sock` (all desktop installs have it).
+
+## CLI launcher (no Python needed)
+
+`identify_wing.sh` (macOS/Linux/WSL) and `identify_wing.ps1` (Windows)
+prompt for everything interactively, build, run, and afterwards **remove the
+containers and images** (the build cache and the weights volume stay):
+
+```bash
+./identify_wing.sh          # or on Windows:
+powershell -ExecutionPolicy Bypass -File .\identify_wing.ps1
+```
+
+Both ask: **mode 1** (wing photo + HF token + prompt-points JSON) or
+**mode 2** (contour CSV). For mode 1 the launcher needs a **prompt-points
+JSON** file — the CLI has no canvas, so either let the GUI wizard generate
+it once (it writes `_prompts_<photo>.json` next to the photo), or copy the
+bundled example and edit the coordinates:
+
+```json
+{ "pa2r": {"points": [[1438, 301], [1031, 416], [1032, 584]], "labels": [1, 0, 0]},
+  "dm":   {"points": [[1031, 416], [1438, 301], [1032, 584]], "labels": [1, 0, 0]} }
+```
+
+Points are `[x, y]` pixel coordinates in the **original** photo: the first
+is inside the cell (label 1), the next two outside it (label 0). The bundled
+`prompts_bkarnyi9.json` matches `B.karnyi.9_cleanup.png` and doubles as a
+template.
+
+## Platform notes
+
+- The **classification image is x86_64 only** (the GUIDE binary). On Apple
+  Silicon it runs through Rosetta emulation — enable *Settings → General →
+  Use Rosetta for x86_64/amd64 emulation* in Docker Desktop for best speed.
+- The **segmentation image runs natively** on both amd64 and arm64.
+- Measured sizes: classification image **1.9 GB**; segmentation image
+  **1.36 GB** (builds in about a minute thanks to layer caching); SAM3
+  weights **3.4 GB** (one-time download, kept in the Docker volume).
+- A CPU-only segmentation takes minutes per wing cell (comparable to the
+  Colab notebook's CPU timing). A CUDA GPU accelerates this dramatically if
+  you have one — the container detects it automatically.
+- Rough RAM need: ≈ 5 GB for the segmentation stage, ≈ 1 GB for
+  classification. On Macs, raise the Docker Desktop VM memory limit
+  accordingly (*Settings → Resources*).
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `identify_wing.sh` / `identify_wing.ps1` | Interactive launchers (bash for macOS,Linux / PowerShell for Windows) — prompt for input, build, run, then remove the container + image |
-| `Dockerfile.workflow` | Image definition (ubuntu:22.04, R, Momocs 1.5.0, GUIDE Ubuntu22 binary) |
-| `run_workflow.sh` | Entrypoint — orchestrates Tasks 2–5 and reports the prediction |
-| `process_features.R` | EFD → normalisation → LDA → full GUIDE data file |
-| `normalisation_scale_rotate_phase.R` | Custom scale/rotate/phase normalisation (sourced by the script) |
-| `lda_loadings_fold_1_{dm,pa2r}.txt` | Fold-1 LDA rotation matrices (37 features → 12 LDs per cell) |
-| `mean_ld_train_fd_1_{dm,pa2r}.rds` | Fold-1 training-set LDA means (for centering) |
-| `dm_testing.csv`, `pa2r_testing.csv` | Fold-1 testing set (130 samples, re-projected at runtime) |
-| `guide_input/combined_fd1_dmpa2r_data.txt` | Base GUIDE data file — supplies the 491 training rows (weight = 1) |
-| `guide_input/fold_1_guide_data_rf.in` | GUIDE command file (random forest) |
-| `guide_input/fold_1_guide_data.dsc` | GUIDE variable description (28 variables, `species` = class, `weight` = w) |
-| `contours_coordinates*.csv` | Contour samples (dm_x, dm_y, pa2r_x, pa2r_y) — ALL files matching this pattern in the directory are baked into the image at build time; add new samples freely and rebuild |
+| `identify_gui.py` | Desktop wizard (two modes: segment+identify / classify CSV) |
+| `webserver.py` + `templates/` + `Dockerfile.web` | Browser frontend (Flask + Docker SDK CLI in a container; served at localhost:8080) |
+| `start_web.sh` / `start_web.ps1` | Launchers for the browser frontend (build the web image, start it, open the page) |
+| `gui_logic.py` | Tkinter-free logic (parsing, coordinate mapping, JSON schema) |
+| `test_gui_logic.py` | Headless unit tests — `python3 test_gui_logic.py` (36 checks) |
+| `identify_wing.sh` / `identify_wing.ps1` | Interactive CLI launchers (both modes) |
+| `segment_wing.py` | SAM3 segmentation entrypoint (Hugging Face transformers port) |
+| `Dockerfile.segment` | Segmentation image (python:3.11-slim, CPU-only PyTorch) |
+| `prompts_bkarnyi9.json` | Example prompt points for `B.karnyi.9_cleanup.png` |
+| `example_clicks.png` | Fallback click-placement example for the web frontend (used until a first run produces `qc_overlay_*.png`; generated by `gen_example.py`) |
+| `run_segment_benchmark.sh` | One-shot benchmark/validation run (hidden token prompt, writes the CSV + masks + log) |
+| `qc_masks.py` | Segmentation quality control — structure, prompt-point containment, IoU vs a reference, and QC overlay images. Run inside the segmentation container:
+  `docker run --rm -v "$PWD:/work" -w /work --entrypoint python3 flywing-segment qc_masks.py <photo> [--masks-dir DIR] [--prompts FILE] [--known reference.csv]` |
+| `B.karnyi.9_cleanup.png` | Test wing photo (for end-to-end validation) |
+| `segment_wing_github.py` / `Dockerfile.segment_github` | Alternative segmentation image using the **official GitHub SAM3** (see below) |
+| `Dockerfile.workflow` | Classification image (ubuntu:22.04, R, Momocs 1.5.0, GUIDE) |
+| `run_workflow.sh` | Classification entrypoint — orchestrates EFD → LDA → GUIDE |
+| `process_features.R`, `normalisation_scale_rotate_phase.R` | Feature extraction & normalisation |
+| `lda_loadings_fold_1_{dm,pa2r}.txt`, `mean_ld_train_fd_1_{dm,pa2r}.rds` | Fold-1 LDA model pieces |
+| `dm_testing.csv`, `pa2r_testing.csv` | Fold-1 testing set (130 samples) |
+| `guide_input/…` | GUIDE base data, command file, variable description |
+| `contours_coordinates*.csv` | Contour samples — ALL matching files are baked into the classification image at build time |
 
-## Interactive one-shot run (recommended for non-Docker users)
+## Alternative: official GitHub SAM3 implementation
 
-`identify_wing.sh` wraps the whole cycle: it prompts for the contour CSV and
-the species, builds the image, runs the classification, and afterwards
-**removes the container and the image** again — nothing stays on the machine
-except the (reusable) build cache:
+The default segmentation image uses the **Hugging Face transformers port**
+of SAM3 — the exact code path of the Colab notebook. `Dockerfile.segment_github`
+builds a drop-in alternative from **https://github.com/facebookresearch/sam3**
+(point prompts via its SAM1/SAM2-style interactive predictor):
+
+- same gated checkpoint (`facebook/sam3`) — **the same HF token works**;
+- bigger image (≈ 2.3 GB) and needs a one-line CPU patch applied at build
+  time (documented inside the Dockerfile);
+- useful as a fallback or for cross-checking masks against the default.
 
 ```bash
-./identify_wing.sh
+curl -sL https://github.com/facebookresearch/sam3/archive/refs/heads/main.tar.gz -o sam3-main.tar.gz
+docker build -f Dockerfile.segment_github -t flywing-segment-github .
+docker run --rm -v "$PWD:/work" -w /work -v flywing-sam3-cache:/root/.cache/huggingface \
+  -e HF_TOKEN=… flywing-segment-github photo.png --points prompts.json
 ```
-
-- Contour file: type the file name (files in this directory are listed) or a
-  full path — files from elsewhere are copied in and renamed automatically if
-  they do not follow the `contours_coordinates*.csv` convention.
-- Species: press ENTER for an unknown sample (top-3 report), or type one of the
-  training species to validate a known sample.
 
 ## Manual build & run
 
-The GUIDE binary is x86_64 only — build/run with the amd64 platform on Apple Silicon
-(enable *Settings → General → Use Rosetta for x86_64/amd64 emulation* for best speed):
+Classification (GUIDE is x86_64-only — use the amd64 platform on Apple Silicon):
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.workflow -t flywing-workflow .
-
-# known sample - validates the prediction against the given true_species
-docker run --rm --platform linux/amd64 flywing-workflow contours_coordinates_cvicina.csv C.vicina
 docker run --rm --platform linux/amd64 flywing-workflow contours_coordinates_bkarnyi.csv B.karnyi
-
-# unknown sample - omit true_species input; the top-3 most probable species are reported
-docker run --rm --platform linux/amd64 flywing-workflow contours_coordinates.csv
 ```
 
-Notes:
-- `run_workflow.sh` is the image ENTRYPOINT — pass only the arguments, not the script path.
-- Known sample: 2nd argument = the validation species → MATCH/MISMATCH report.
-- Unknown sample: no 2nd argument → the row carries the default placeholder label
-  `C.vicina` (GUIDE requires a training-level class label on every row); it is
-  excluded from training (weight = 0) and does not affect the prediction —
-  the workflow instead reports the top-3 species with the highest probabilities.
-- Each container run works on its own copy of the data — no host files are modified.
-- To classify a new sample: name its CSV `contours_coordinates*.csv`, put it in this directory, rebuild the image, then run
-  `docker run ... flywing-workflow <csv> [<species>]`.
+Segmentation (native architecture, weights volume, first run downloads):
+
+```bash
+docker build -f Dockerfile.segment -t flywing-segment .
+docker run --rm -v "$PWD:/work" -w /work \
+  -v flywing-sam3-cache:/root/.cache/huggingface -e HF_TOKEN=… \
+  flywing-segment B.karnyi.9_cleanup.png --points prompts_bkarnyi9.json \
+  --out contours_coordinates_B.karnyi.9.csv --masks-dir masks_bkarnyi9
+```
 
 ## Clean up
 
-The image is ~1.9 GB. To remove it after running the workflow (so it does not
-sit on the machine unused):
+Containers and workflow images are removed automatically after each run. The web
+server (`flywing-web`) keeps running until you stop it with
+`docker rm -f flywing-web` (its image can then be removed with
+`docker rmi flywing-web`). What stays:
 
-```bash
-docker rmi flywing-workflow
-```
-
-The build cache is kept, so a later rebuild is still fast. To free that space as well:
-
-```bash
-docker builder prune
-```
+- the **build cache** (fast rebuilds) — free with `docker builder prune`;
+- the **weights volume** `flywing-sam3-cache` (avoid re-downloading 3.4 GB) —
+  free with `docker volume rm flywing-sam3-cache`;
+- your samples and the small QC artifacts (`contours_coordinates*.csv`,
+  `masks_*/`, `_prompts_*.json`).
