@@ -1,4 +1,4 @@
-# Fly Wing Species Identification — Docker Workflow (full pipeline)
+# Fly Wing Species Identification — Docker Workflow (Web Launcher GUI)
 
 Self-contained deployment of the complete pipeline — segmentation **and**
 classification — in two chained Docker containers, driven by a browser
