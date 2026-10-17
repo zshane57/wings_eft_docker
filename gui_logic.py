@@ -5,7 +5,7 @@
 # Everything that does not need a display lives here so it can be
 # unit-tested on any machine ("python3 test_gui_logic.py").
 #
-# Used by identify_gui.py (Tasks 2-6 wizard).
+# Used by webserver.py (browser frontend).
 # --------------------------------------------------------------
 
 import fnmatch
