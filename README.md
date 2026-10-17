@@ -1,8 +1,9 @@
 # Fly Wing Species Identification — Docker Workflow (full pipeline)
 
 Self-contained deployment of the complete pipeline — segmentation **and**
-classification — in two chained Docker containers, driven by one GUI wizard
-or one CLI launcher:
+classification — in two chained Docker containers, driven by a browser
+page. For a terminal-only workflow, use the sibling `docker_workflow/`
+package (same images, command-line launchers) instead:
 
 ```
 wing photo  →  SAM3 segmentation (point prompts)  →  contour CSV
@@ -32,43 +33,7 @@ Skip the segmentation stage: classify the CSV directly (GUI mode 2).
    notebook **`flieswings_proj.ipynb`** <!-- ADD NOTEBOOK LINK HERE --> and
    place it in this directory (columns `dm_x, dm_y, pa2r_x, pa2r_y`).
 
-## Graphical wizard (easiest way to run)
-
-`identify_gui.py` (Python 3.8+ with tkinter; pillow optional but recommended
-for JPEG photos and smoother scaling):
-
-- **macOS:** `python3 identify_gui.py` — Apple's bundled `python3` lacks
-  tkinter; use the python.org installer or `brew install python-tk`
-- **Windows:** `py identify_gui.py` (the python.org installer includes tkinter)
-- **Linux:** `sudo apt install python3 python3-tk`, then `python3 identify_gui.py`
-
-### Mode 1 — Segment a wing photo, then identify it
-
-1. Browse for the wing photo (PNG/JPEG).
-2. Paste your Hugging Face token into the masked field (needed only for the
-   first download).
-3. Click **"Click on the photo…"** — the photo opens in a window; per wing
-   cell (pa2r first, then dm) click **1 point inside the cell (green)** and
-   **2 points outside it (red, excluding the neighbouring cells)**. Undo and
-   reset buttons are available; the coordinate mapping is automatic.
-4. Optionally pick the species (for validation) or leave it unknown.
-5. Click **Segment & Identify** — the SAM3 container runs, produces the
-   contour CSV, and classification starts automatically. The log pane
-   streams everything; the result panel shows the prediction.
-
-Quality check: the segmentation container also writes `masks_<photo>/` —
-two PNGs showing the segmented cells in white. For a proper check run
-`qc_masks.py` (below), and/or open the generated `qc_overlay_*.png`
-files — the yellow SAM3 boundary should trace the cell cleanly; prompt
-points appear as green (inside) / red (outside) dots. If a mask looks
-wrong, redo the run with better-placed points.
-
-### Mode 2 — Classify an existing contour CSV
-
-The original behaviour: browse for a `contours_coordinates*.csv`, optionally
-pick the species, click **Identify`.
-
-## Web frontend (browser — no Python on the host needed)
+## Web frontend (browser — the only frontend, no Python on the host needed)
 
 `start_web.sh` (macOS/Linux) or `start_web.ps1` (Windows) builds a small
 Flask container (~325 MB) and opens the workflow in your browser:
@@ -76,7 +41,7 @@ Flask container (~325 MB) and opens the workflow in your browser:
     ./start_web.sh        # or:  powershell -ExecutionPolicy Bypass -File .\start_web.ps1
     → http://localhost:8080
 
-The page offers the same two modes as the desktop wizard:
+The page offers two modes:
 
 - **Segment a wing photo, then identify it** — upload the photo, click the
   6 prompt points directly on the image (green inside + 2 red outside,
@@ -88,6 +53,11 @@ The page offers the same two modes as the desktop wizard:
 - **Classify an existing contour CSV** — upload a `contours_coordinates*.csv`
   and run.
 
+Segmentation runs also write `masks_<photo>/` (the segmented cells), save the
+clicked points as `_prompts_<photo-stem>.json` (schema below), and produce
+the QC overlays. For deeper checks run `qc_masks.py` (below); if an overlay
+looks wrong, redo the run with better-placed points.
+
 The server drives the same Docker images as the other frontends, binds to
 **localhost only**, passes the token to the container as an environment
 variable (never writes it to disk), and removes the workflow containers
@@ -98,22 +68,10 @@ and images after each run. It keeps running until you stop it:
 Requires Docker Desktop or any Docker Engine with the standard
 `/var/run/docker.sock` (all desktop installs have it).
 
-## CLI launcher (no Python needed)
+### Prompt-points files
 
-`identify_wing.sh` (macOS/Linux/WSL) and `identify_wing.ps1` (Windows)
-prompt for everything interactively, build, run, and afterwards **remove the
-containers and images** (the build cache and the weights volume stay):
-
-```bash
-./identify_wing.sh          # or on Windows:
-powershell -ExecutionPolicy Bypass -File .\identify_wing.ps1
-```
-
-Both ask: **mode 1** (wing photo + HF token + prompt-points JSON) or
-**mode 2** (contour CSV). For mode 1 the launcher needs a **prompt-points
-JSON** file — the CLI has no canvas, so either let the GUI wizard generate
-it once (it writes `_prompts_<photo>.json` next to the photo), or copy the
-bundled example and edit the coordinates:
+Every segmentation run saves the clicked points next to the photo as
+`_prompts_<photo-stem>.json`:
 
 ```json
 { "pa2r": {"points": [[1438, 301], [1031, 416], [1032, 584]], "labels": [1, 0, 0]},
@@ -124,6 +82,10 @@ Points are `[x, y]` pixel coordinates in the **original** photo: the first
 is inside the cell (label 1), the next two outside it (label 0). The bundled
 `prompts_bkarnyi9.json` matches `B.karnyi.9_cleanup.png` and doubles as a
 template.
+
+For a terminal-only (browser-free) workflow, use the sibling
+**`docker_workflow/`** package instead — same Docker images, command-line
+launchers.
 
 ## Platform notes
 
@@ -145,12 +107,10 @@ template.
 
 | File | Purpose |
 |---|---|
-| `identify_gui.py` | Desktop wizard (two modes: segment+identify / classify CSV) |
 | `webserver.py` + `templates/` + `Dockerfile.web` | Browser frontend (Flask + Docker SDK CLI in a container; served at localhost:8080) |
 | `start_web.sh` / `start_web.ps1` | Launchers for the browser frontend (build the web image, start it, open the page) |
-| `gui_logic.py` | Tkinter-free logic (parsing, coordinate mapping, JSON schema) |
+| `gui_logic.py` | Shared logic for the web server (output parsing, coordinate mapping, points-JSON schema) |
 | `test_gui_logic.py` | Headless unit tests — `python3 test_gui_logic.py` (36 checks) |
-| `identify_wing.sh` / `identify_wing.ps1` | Interactive CLI launchers (both modes) |
 | `segment_wing.py` | SAM3 segmentation entrypoint (Hugging Face transformers port) |
 | `Dockerfile.segment` | Segmentation image (python:3.11-slim, CPU-only PyTorch) |
 | `prompts_bkarnyi9.json` | Example prompt points for `B.karnyi.9_cleanup.png` |
