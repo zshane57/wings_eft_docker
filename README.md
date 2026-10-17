@@ -33,7 +33,7 @@ Skip the segmentation stage: classify the CSV directly (GUI mode 2).
    notebook **`flieswings_proj.ipynb`** <!-- ADD NOTEBOOK LINK HERE --> and
    place it in this directory (columns `dm_x, dm_y, pa2r_x, pa2r_y`).
 
-## Web frontend (browser — the only frontend, no Python on the host needed)
+## Web frontend
 
 `start_web.sh` (macOS/Linux) or `start_web.ps1` (Windows) builds a small
 Flask container (~325 MB) and opens the workflow in your browser:
