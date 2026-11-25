@@ -1,7 +1,7 @@
 # --------------------------------------------------------------
 # Forensic Fly Wing Species Classification — Segmentation image
-# SAM3 wing-cell segmentation (point prompts -> contours CSV),
-# the desktop/Docker port of the Colab notebook.
+# YOLOv8 wing-cell boxes -> SAM3 segmentation -> contours CSV.
+# Manual point prompts remain available as a fallback.
 #
 # CPU-only PyTorch keeps the image small (~2 GB instead of ~6 GB);
 # the model weights (3.44 GB, gated) are downloaded on first run
@@ -17,18 +17,27 @@
 # Run:
 #   docker run --rm -v "$PWD":/work -e HF_TOKEN=hf_xxx \
 #       -v flywing-sam3-cache:/root/.cache/huggingface flywing-segment \
-#       wing.png --points points.json
+#       wing.png
+# Manual fallback: append --prompt-mode manual --points points.json
 # --------------------------------------------------------------
 
 FROM python:3.11-slim
 
-# ---- CPU-only PyTorch + SAM3 stack ------------------------------------------
+# ultralytics depends on full opencv-python; these are its headless runtime
+# libraries (no display server or GPU is required).
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- CPU-only PyTorch + YOLOv8/SAM3 stack -----------------------------------
 RUN pip install --no-cache-dir torch torchvision \
         --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir transformers opencv-python-headless pillow pandas
+    && pip install --no-cache-dir \
+        transformers opencv-python pillow pandas ultralytics
 
 WORKDIR /work
 
-COPY segment_wing.py /app/segment_wing.py
+COPY segment_wing.py wing_detection.py /app/
+COPY models/yolo_wings_best.pt /app/models/yolo_wings_best.pt
 
 ENTRYPOINT ["python3", "/app/segment_wing.py"]

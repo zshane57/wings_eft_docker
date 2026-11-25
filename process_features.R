@@ -424,4 +424,46 @@ write.table(full_data,
             row.names = FALSE,
             col.names = TRUE)
 
+# Export the exact per-sample numeric inputs/outputs of the LDA stage. The
+# EFD values are the FINAL scale/rotation/phase-normalised coefficients (40
+# per cell), not the unnormalised efourier() values. Keep all 40 even though
+# a1/b1/c1 are dropped before projection. The 24 LD values are centred with
+# the fold-1 training means and are identical to the new-sample GUIDE row.
+feature_csv <- Sys.getenv("FEATURE_CSV", "new_sample_efd_lda_features.csv")
+feature_dir <- dirname(feature_csv)
+if (!dir.exists(feature_dir)) {
+  dir.create(feature_dir, recursive = TRUE, showWarnings = FALSE)
+}
+
+feature_export <- data.frame(
+  sample_name = dm_df_raw$name,
+  species = dm_df_raw$species,
+  family = dm_df_raw$family,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+coefficient_names <- c(paste0("a", 1:H), paste0("b", 1:H),
+                       paste0("c", 1:H), paste0("d", 1:H))
+for (cell in c("dm", "pa2r")) {
+  values <- if (cell == "dm") vec_dm else vec_pa2r
+  values <- as.numeric(values)
+  if (length(values) != 40) {
+    stop(sprintf("Expected 40 normalised EFD coefficients for %s, got %d.",
+                 cell, length(values)))
+  }
+  for (j in seq_along(coefficient_names)) {
+    feature_export[[paste0(cell, "_", coefficient_names[j])]] <- values[j]
+  }
+}
+for (name in names(features_24)) {
+  feature_export[[name]] <- unname(features_24[[name]])
+}
+if (ncol(feature_export) != 107) {
+  stop(sprintf("Expected 107 feature-export columns, got %d.",
+               ncol(feature_export)))
+}
+write.csv(feature_export, file = feature_csv, row.names = FALSE)
+cat(sprintf("Wrote 80 normalised EFD coefficients + 24 LDA features to %s\n",
+            feature_csv))
+
 cat("Done.\n")

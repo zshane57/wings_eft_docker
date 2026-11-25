@@ -85,7 +85,9 @@ def parse_output(text):
 # Parsing of the segmentation stage output
 # ----------------------------------------------------------------------------
 _BENCH_NAMES = {
-    "model_load": "model load",
+    "yolo_model_load": "YOLO model load",
+    "yolo_detect": "YOLO detection",
+    "model_load": "SAM3 model load",
     "image_encode": "image encode",
     "inference_pa2r": "pa2r inference",
     "inference_dm": "dm inference",
@@ -111,8 +113,8 @@ def parse_segment_bench(text):
 
 def pretty_bench(timings):
     """Human-readable multi-line summary for the GUI log."""
-    order = ["model_load", "image_encode", "inference_pa2r",
-             "inference_dm", "peak_rss_mb"]
+    order = ["yolo_model_load", "yolo_detect", "model_load", "image_encode",
+             "inference_pa2r", "inference_dm", "peak_rss_mb"]
     out = []
     for tag in order:
         if tag in timings:
@@ -181,3 +183,12 @@ def image_stem(path):
     base = os.path.basename(path.strip())
     base = os.path.splitext(base)[0]
     return base.replace(" ", "_")
+
+
+def feature_csv_name(contour_csv):
+    """Host-visible combined EFD/LDA export name for a contour sample."""
+    stem = image_stem(contour_csv)
+    prefix = "contours_coordinates_"
+    if stem.startswith(prefix):
+        stem = stem[len(prefix):]
+    return f"efd_lda_features_{stem or 'sample'}.csv"

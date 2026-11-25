@@ -16,7 +16,7 @@
 #     -> predicted vs expected species, MATCH/MISMATCH verdict
 #
 #   Unknown sample (no species given):
-#     ./run_workflow.sh contours_coordinates_nudiseta.csv
+#     ./run_workflow.sh contours_coordinates_new_sample.csv
 #     -> the row carries the default placeholder label C.vicina
 #        (GUIDE requires a valid class label on every row; the label
 #        never enters training and does not affect the prediction)
@@ -63,6 +63,8 @@ fi
 DATA_FILE="guide_input/combined_fd1_dmpa2r_data.txt"
 GUIDE_IN="fold_1_guide_data_rf.in"
 PROB_FILE="guide_input/identification_prob.txt"   # declared inside the .in file
+# Optional host-visible export path (the web server supplies /work/<name>.csv).
+FEATURE_CSV="${FEATURE_CSV:-new_sample_efd_lda_features.csv}"
 
 echo "================================================================"
 if [ "$KNOWN_SPECIES" = "1" ]; then
@@ -77,7 +79,8 @@ fi
 echo "================================================================"
 echo
 echo "=== [Tasks 2-4] EFD -> normalisation -> LDA -> GUIDE data file ==="
-Rscript process_features.R "$CONTOURS_CSV" "$DATA_FILE" "$TRUE_SPECIES"
+FEATURE_CSV="$FEATURE_CSV" Rscript process_features.R "$CONTOURS_CSV" "$DATA_FILE" "$TRUE_SPECIES"
+echo "Feature export: $FEATURE_CSV"
 echo
 
 echo "=== [Task 5] GUIDE random-forest classification ==="

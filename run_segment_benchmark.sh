@@ -1,6 +1,6 @@
 #!/bin/bash
 # --------------------------------------------------------------
-# run_segment_benchmark.sh — one-shot SAM3 segmentation benchmark
+# run_segment_benchmark.sh — one-shot YOLOv8 + SAM3 segmentation benchmark
 # (Phase 1 of the combined workflow; run this once with your
 #  Hugging Face token, then hand the results back for validation)
 #
@@ -25,7 +25,6 @@ cd "$(dirname "$0")"
 IMAGE="flywing-segment"
 VOLUME="flywing-sam3-cache"
 PHOTO="B.karnyi.9_cleanup.png"
-POINTS="prompts_bkarnyi9.json"
 OUT="contours_coordinates_B.karnyi.9.csv"
 MASKS="masks_bkarnyi9"
 LOG="_benchmark_last.log"
@@ -38,7 +37,7 @@ else
 fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "=== Building the SAM3 segmentation image ==="
+  echo "=== Building the YOLOv8 + SAM3 segmentation image ==="
   docker build -f Dockerfile.segment -t "$IMAGE" .
 fi
 
@@ -48,11 +47,11 @@ echo "Docker volume '$VOLUME' for next time). CPU-only: expect a few minutes."
 docker run --rm -v "$PWD:/work" -w /work \
   -v "$VOLUME:/root/.cache/huggingface" \
   -e "HF_TOKEN=$TOKEN" \
-  "$IMAGE" "$PHOTO" --points "$POINTS" --out "$OUT" --masks-dir "$MASKS" \
+  "$IMAGE" "$PHOTO" --prompt-mode auto --out "$OUT" --masks-dir "$MASKS" \
   2>&1 | tee "$LOG"
 
 echo
 echo "=== Benchmark summary ==="
 grep "SEGMENT_BENCH" "$LOG" || true
 echo
-echo "Produced: $OUT, $MASKS/, $LOG"
+echo "Produced: $OUT, $MASKS/, _detections_B.karnyi.9_cleanup.json, $LOG"

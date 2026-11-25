@@ -25,8 +25,8 @@ from werkzeug.utils import secure_filename
 
 from gui_logic import (
     CLASSIFY_CONTAINER, CLASSIFY_IMAGE, CACHE_VOLUME, SEG_CONTAINER,
-    SEG_IMAGE, UNKNOWN_LABEL, VALID_SPECIES, image_stem, parse_output,
-    parse_segment_bench, pretty_bench, points_json, write_points_json,
+    SEG_IMAGE, UNKNOWN_LABEL, VALID_SPECIES, feature_csv_name, image_stem,
+    parse_output, parse_segment_bench, pretty_bench, points_json, write_points_json,
 )
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +46,7 @@ job = {
     "log": [],
     "result": None,
     "error": None,
+    "error_code": None,
     "proc": None,
     "cancel": False,
 }
@@ -123,15 +124,21 @@ def do_job(payload):
         if mode == "1":
             job["phase"] = "segmentation"
             photo = payload["photo"]            # already inside WORK_DIR
+            prompt_mode = payload.get("prompt_mode", "auto")
+            if prompt_mode not in ("auto", "manual"):
+                raise RuntimeError("Invalid prompt mode; use auto or manual.")
             stem = image_stem(photo)
             prompts_name = f"_prompts_{stem}.json"
-            write_points_json(os.path.join(WORK_DIR, prompts_name),
-                              payload["points"])
+            detections_name = f"_detections_{stem}.json"
+            aligned_name = f"_aligned_{stem}.png"
+            if prompt_mode == "manual":
+                write_points_json(os.path.join(WORK_DIR, prompts_name),
+                                  payload["points"])
             out_csv = f"contours_coordinates_{stem}.csv"
             masks_dir = f"masks_{stem}"
 
             job["log"].append("")
-            job["log"].append("=== Building the SAM3 segmentation image ===")
+            job["log"].append("=== Building the YOLOv8 + SAM3 segmentation image ===")
             check_cancel()
             # build: the docker CLI inside THIS container reads the
             # context, so the container-side path (WORK_DIR) is correct
@@ -141,7 +148,11 @@ def do_job(payload):
             if rc != 0:
                 raise RuntimeError("Segmentation image build failed.")
 
-            job["log"].append("=== Segmenting the wing cells ===")
+            if prompt_mode == "auto":
+                job["log"].append("=== Detecting and segmenting the wing cells ===")
+                job["log"].append("YOLOv8: imgsz=1024, conf=0.5; native SAM3 box prompts.")
+            else:
+                job["log"].append("=== Segmenting with manual point prompts ===")
             job["log"].append("First run downloads ~3.4 GB of gated weights "
                               "once (kept in the Docker volume).")
             check_cancel()
@@ -151,12 +162,23 @@ def do_job(payload):
             if token:
                 cmd += ["-e", f"HF_TOKEN={token}"]
             cmd += [SEG_IMAGE, photo,
-                    "--points", prompts_name,
+                    "--prompt-mode", prompt_mode,
                     "--out", out_csv,
                     "--masks-dir", masks_dir]
+            if prompt_mode == "manual":
+                cmd += ["--points", prompts_name]
+            else:
+                cmd += ["--detections-out", detections_name,
+                        "--aligned-out", aligned_name]
             rc, seg_lines = run_capture(cmd)
             check_cancel()
             if rc != 0:
+                if prompt_mode == "auto" and rc == 2:
+                    job["error_code"] = "detection_incomplete"
+                    raise RuntimeError(
+                        "YOLOv8 did not detect both wing cells. The image was "
+                        "skipped cleanly; use the manual prompt fallback shown "
+                        "in the input panel.")
                 raise RuntimeError("Segmentation run failed "
                                    "(token accepted? weights downloaded?)")
             seg_text = "\n".join(seg_lines)
@@ -172,11 +194,16 @@ def do_job(payload):
             # automatic mask QC (structure + overlays)
             job["log"].append("")
             job["log"].append("=== Mask quality control ===")
-            rc, qc_lines = run_capture([
+            qc_cmd = [
                 "docker", "run", "--rm", "-v", f"{HOST_WORK_DIR}:/work",
                 "-w", "/work", "--entrypoint", "python3", SEG_IMAGE,
-                "qc_masks.py", photo,
-                "--masks-dir", masks_dir, "--prompts", prompts_name])
+                "qc_masks.py", aligned_name if prompt_mode == "auto" else photo,
+                "--masks-dir", masks_dir]
+            if prompt_mode == "auto":
+                qc_cmd += ["--detections", detections_name]
+            else:
+                qc_cmd += ["--prompts", prompts_name]
+            rc, qc_lines = run_capture(qc_cmd)
             csv_name = csv_from_log
             job["result_artifacts"] = {
                 "csv": csv_from_log,
@@ -184,6 +211,11 @@ def do_job(payload):
                 "overlay_pa2r": "qc_overlay_pa2r.png",
                 "overlay_dm": "qc_overlay_dm.png",
             }
+            if prompt_mode == "auto":
+                job["result_artifacts"].update({
+                    "detections": detections_name,
+                    "aligned_image": aligned_name,
+                })
 
         else:
             job["phase"] = "classification"
@@ -207,7 +239,15 @@ def do_job(payload):
 
         job["log"].append("=== Classifying ===")
         check_cancel()
-        cmd = ["docker", "run", "--rm", "--name", CLASSIFY_CONTAINER] + \
+        features_name = feature_csv_name(csv_name)
+        features_path = os.path.join(WORK_DIR, features_name)
+        try:
+            os.remove(features_path)       # never expose a stale previous run
+        except FileNotFoundError:
+            pass
+        cmd = ["docker", "run", "--rm", "--name", CLASSIFY_CONTAINER,
+               "-v", f"{HOST_WORK_DIR}:/work",
+               "-e", f"FEATURE_CSV=/work/{features_name}"] + \
             platform_flags + [CLASSIFY_IMAGE, csv_name]
         if species:
             cmd.append(species)
@@ -218,6 +258,13 @@ def do_job(payload):
         result = parse_output("\n".join(clf_lines))
         if result["mode"] == "known" and result["predicted"] is None:
             raise RuntimeError("Could not read the prediction from the output.")
+        if not os.path.isfile(features_path) or os.path.getsize(features_path) == 0:
+            raise RuntimeError("Classification finished, but the EFD/LDA "
+                               "feature CSV was not created.")
+        job["result_artifacts"]["features_csv"] = features_name
+        job["log"].append(
+            f"Feature export saved: {features_name} "
+            "(80 normalised EFD coefficients + 24 LDA features)")
 
         job["result"] = result
         job["state"] = "done"
@@ -290,6 +337,7 @@ def api_run():
         job["log"] = []
         job["result"] = None
         job["error"] = None
+        job["error_code"] = None
         job["cancel"] = False
         job["result_artifacts"] = {}
     threading.Thread(target=do_job, args=(data,), daemon=True).start()
@@ -311,6 +359,7 @@ def api_status():
             "result": job["result"] if job["state"] == "done" else None,
             "artifacts": job.get("result_artifacts") or {},
             "error": job["error"],
+            "error_code": job.get("error_code"),
         }
     return jsonify(payload)
 

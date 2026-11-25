@@ -137,6 +137,16 @@ print("image_stem")
 check("plain", gl.image_stem("/x/B.karnyi.9_cleanup.png") == "B.karnyi.9_cleanup")
 check("spaces", gl.image_stem("/x/wing photo B.karnyi.9.png") == "wing_photo_B.karnyi.9")
 
+print("feature_csv_name")
+check("removes contour prefix",
+      gl.feature_csv_name("contours_coordinates_B.karnyi.9.csv") ==
+      "efd_lda_features_B.karnyi.9.csv")
+check("uses a safe sample basename",
+      gl.feature_csv_name("/x/contours_coordinates_wing photo.csv") ==
+      "efd_lda_features_wing_photo.csv")
+check("non-prefixed CSV still has a name",
+      gl.feature_csv_name("sample.csv") == "efd_lda_features_sample.csv")
+
 # ----------------------------------------------------------------------------
 print()
 if FAILURES:

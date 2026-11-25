@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 # --------------------------------------------------------------
-# segment_wing.py — SAM3 wing-cell segmentation (container entrypoint)
+# segment_wing.py — YOLOv8 + SAM3 wing-cell segmentation
 #
-# Desktop/Docker port of the Colab notebook (flieswings_proj.ipynb):
-#   - facebook/sam3 via Hugging Face transformers (gated model —
-#     requires the HF_TOKEN environment variable and prior access
-#     approval at https://huggingface.co/facebook/sam3)
-#   - point prompts: per wing cell, 1 inclusive + 2 exclusive points
-#     (the desktop equivalent of the Colab click collector)
-#   - OpenCV contour extraction, y-axis flip (y * -1), NaN padding,
-#     CSV in the exact dm_x, dm_y, pa2r_x, pa2r_y format expected by
-#     the classification workflow
+# Automatic mode (default):
+#   upright-landscape alignment -> YOLOv8 boxes (pa2r/dm) ->
+#   native SAM3 bounding-box prompts -> OpenCV contours -> CSV.
+# Manual fallback:
+#   the original 1 inclusive + 2 exclusive point prompt per cell.
 #
 # Usage:
-#   python3 segment_wing.py <image> --points <points.json> \
-#          [--model facebook/sam3] [--out contours_coordinates_X.csv] \
-#          [--device auto|cpu|cuda] [--masks-dir DIR]
+#   python3 segment_wing.py <image> [--prompt-mode auto|manual] \
+#          [--points points.json] [--model facebook/sam3] \
+#          [--out contours_coordinates_X.csv] [--device auto|cpu|cuda] \
+#          [--masks-dir DIR]
 #
-# points.json format (pixel coordinates, same as the Colab clicks):
+# Automatic detection uses /app/models/yolo_wings_best.pt at imgsz=1024,
+# conf=0.5. Class 0 is pa2r (legacy masks5), class 1 is dm (legacy masks9).
+# If either class is missing, a partial _detections_<stem>.json is written,
+# a filename-specific WARNING is logged, and the process exits with status 2
+# so the web UI can offer manual prompting instead of crashing.
+#
+# Manual points.json format (original-image pixel coordinates):
 #   {
 #     "pa2r": {"points": [[x, y], ...], "labels": [1, 0, 0]},
 #     "dm":   {"points": [[x, y], ...], "labels": [1, 0, 0]}
 #   }
-#   labels: 1 = inclusive, 0 = exclusive
 #
-# The Hugging Face cache (/root/.cache/huggingface) should be mounted
-# as a named Docker volume so the 3.44 GB weights survive image removal.
+# The Hugging Face cache (/root/.cache/huggingface) should be mounted as a
+# named Docker volume so the SAM3 weights survive image removal.
 # --------------------------------------------------------------
 
 import argparse
@@ -42,6 +44,15 @@ import torch
 from PIL import Image
 from transformers import Sam3TrackerModel, Sam3TrackerProcessor
 
+from wing_detection import (
+    YOLO_WEIGHTS,
+    IncompleteDetectionError,
+    WingCellDetector,
+    load_aligned_image,
+    require_complete_boxes,
+    write_detection_json,
+)
+
 
 def log(msg):
     print(msg, flush=True)
@@ -54,14 +65,23 @@ def bench(tag, seconds):
         log(f"SEGMENT_BENCH\t{tag}\t{seconds:.1f}s")
 
 
-def process_wing_cell(model, processor, device, image_obj, points, labels):
-    """Notebook's process_wing_image(): multi-point prompt -> binary mask ->
-    largest OpenCV contour as an (N, 2) [x, y] array."""
+def process_wing_cell(model, processor, device, image_obj,
+                      points=None, labels=None, box=None):
+    """SAM3 box or point prompt -> largest OpenCV contour and binary mask."""
+    if box is not None:
+        # [image level, box level, xyxy] — native SAM3 bounding-box prompt.
+        prompt_inputs = {"input_boxes": [[box]]}
+    else:
+        # [image level, object level, point level, xy] — manual fallback.
+        prompt_inputs = {
+            "input_points": [[points]],
+            "input_labels": [[labels]],
+        }
+
     inputs = processor(
         images=image_obj,
-        input_points=[[points]],
-        input_labels=[[labels]],
         return_tensors="pt",
+        **prompt_inputs,
     ).to(device)
 
     with torch.no_grad():
@@ -90,9 +110,19 @@ def process_wing_cell(model, processor, device, image_obj, points, labels):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="SAM3 wing-cell segmentation")
+    ap = argparse.ArgumentParser(
+        description="Automatic YOLOv8-box + SAM3 wing-cell segmentation")
     ap.add_argument("image", help="path to the wing photo (PNG/JPEG)")
-    ap.add_argument("--points", required=True, help="points.json with the prompts")
+    ap.add_argument("--prompt-mode", default="auto", choices=["auto", "manual"],
+                    help="auto: YOLOv8 boxes (default); manual: point prompts")
+    ap.add_argument("--points", default=None,
+                    help="points.json (required only with --prompt-mode manual)")
+    ap.add_argument("--yolo-model", default=YOLO_WEIGHTS,
+                    help=f"YOLOv8 weights (default: {YOLO_WEIGHTS})")
+    ap.add_argument("--detections-out", default=None,
+                    help="detection JSON (default: _detections_<stem>.json)")
+    ap.add_argument("--aligned-out", default=None,
+                    help="aligned auto-mode image (default: _aligned_<stem>.png)")
     ap.add_argument("--model", default="facebook/sam3",
                     help="HF model id (e.g. facebook/sam3 or facebook/sam3-fast)")
     ap.add_argument("--out", default=None,
@@ -102,6 +132,65 @@ def main():
                     help="optional directory to save the binary masks (PNG) for QC")
     args = ap.parse_args()
 
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+    log(f"Using compute device: {device}")
+
+    stem = os.path.splitext(os.path.basename(args.image))[0]
+    prompts = None
+    boxes = None
+    aligned_out = None
+
+    # ---- orientation + YOLO detection (automatic mode) ---------------------
+    if args.prompt_mode == "auto":
+        image_obj, alignment = load_aligned_image(args.image)
+        log(f"Image aligned for YOLO/SAM3: {alignment['original_size']} -> "
+            f"{alignment['aligned_size']} px, EXIF orientation "
+            f"{alignment['exif_orientation']}, portrait rotation "
+            f"{alignment['portrait_rotation_ccw']} deg CCW")
+
+        aligned_out = args.aligned_out or f"_aligned_{stem}.png"
+        image_obj.save(aligned_out)
+        detections_out = args.detections_out or f"_detections_{stem}.json"
+
+        t0 = time.time()
+        detector = WingCellDetector(args.yolo_model)
+        yolo_load_s = time.time() - t0
+        log(f"YOLOv8 model loaded once: {args.yolo_model} ({yolo_load_s:.1f}s)")
+        bench("yolo_model_load", yolo_load_s)
+
+        t0 = time.time()
+        boxes = detector.detect(image_obj)
+        detect_s = time.time() - t0
+        bench("yolo_detect", detect_s)
+        log(f"YOLOv8 prediction complete ({detect_s:.1f}s, imgsz=1024, conf=0.5)")
+
+        # Save partial results BEFORE the completeness guard for diagnosis.
+        write_detection_json(detections_out, args.image, aligned_out,
+                             alignment, boxes, args.yolo_model)
+        log(f"YOLOv8 detections saved to {detections_out}")
+        for cell in ("pa2r", "dm"):
+            if cell in boxes:
+                detection = boxes[cell]
+                log(f"YOLOv8 {cell} ({detection['mask_target']}): "
+                    f"box={detection['xyxy']}, "
+                    f"confidence={detection['confidence']:.4f}")
+
+        # Emits the required WARNING with filename; exits cleanly via status 2.
+        require_complete_boxes(args.image, boxes)
+
+    else:
+        if not args.points:
+            ap.error("--points is required with --prompt-mode manual")
+        # Manual coordinates remain in the original photo's coordinate frame.
+        image_obj = Image.open(args.image).convert("RGB")
+        with open(args.points) as fh:
+            prompts = json.load(fh)
+        log(f"Manual prompt fallback: {args.points}")
+
+    # ---- SAM3 (downloads on first run into the HF cache) ---------------------
     token = os.environ.get("HF_TOKEN", "").strip()
     if token:
         from huggingface_hub import login
@@ -110,40 +199,39 @@ def main():
         log("Warning: HF_TOKEN is not set — this only works if the weights are "
             "already cached (gated model: https://huggingface.co/facebook/sam3).")
 
-    if args.device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        device = args.device
-    log(f"Using compute device: {device}")
-
-    image_obj = Image.open(args.image).convert("RGB")
-
-    with open(args.points) as fh:
-        prompts = json.load(fh)
-
-    # ---- load model (downloads on first run into the HF cache) --------------
     t0 = time.time()
     processor = Sam3TrackerProcessor.from_pretrained(args.model)
     model = Sam3TrackerModel.from_pretrained(args.model).to(device)
     model.eval()
     load_s = time.time() - t0
-    log(f"Model loaded: {args.model} ({load_s:.1f}s)")
+    log(f"SAM3 model loaded: {args.model} ({load_s:.1f}s)")
     bench("model_load", load_s)
 
     # ---- segment each cell (pa2r first, dm second — same order as Colab) ----
     contours_img = {}
     for cell in ("pa2r", "dm"):
-        if cell not in prompts:
-            raise RuntimeError(f"points.json is missing the '{cell}' prompts.")
-        pts = prompts[cell]["points"]
-        labels = prompts[cell]["labels"]
         t0 = time.time()
-        contour, mask = process_wing_cell(model, processor, device,
-                                          image_obj, pts, labels)
+        if args.prompt_mode == "auto":
+            detection = boxes[cell]
+            contour, mask = process_wing_cell(
+                model, processor, device, image_obj,
+                box=detection["xyxy"])
+            prompt_description = (
+                f"YOLO box: {detection['xyxy']}, "
+                f"confidence: {detection['confidence']:.4f}")
+        else:
+            if cell not in prompts:
+                raise RuntimeError(f"points.json is missing the '{cell}' prompts.")
+            pts = prompts[cell]["points"]
+            labels = prompts[cell]["labels"]
+            contour, mask = process_wing_cell(
+                model, processor, device, image_obj, pts, labels)
+            prompt_description = f"manual prompt points: {pts}"
+
         infer_s = time.time() - t0
         bench(f"inference_{cell}", infer_s)
         log(f"{cell}: {len(contour)} boundary coordinates "
-            f"({infer_s:.1f}s, prompt points: {pts})")
+            f"({infer_s:.1f}s, {prompt_description})")
         contours_img[cell] = contour
 
         if args.masks_dir:
@@ -175,10 +263,7 @@ def main():
         "pa2r_y": padded["pa2r_y"],
     })
 
-    out = args.out
-    if out is None:
-        stem = os.path.splitext(os.path.basename(args.image))[0]
-        out = f"contours_coordinates_{stem}.csv"
+    out = args.out or f"contours_coordinates_{stem}.csv"
     df.to_csv(out, index=False)
     log(f"Contour coordinates saved to {out} ({max_len} rows)")
 
@@ -188,4 +273,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except IncompleteDetectionError:
+        # The detector already logged the actionable filename-specific warning.
+        sys.exit(2)

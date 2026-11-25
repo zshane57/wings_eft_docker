@@ -11,8 +11,8 @@
 # Negative points (labels 0) are supported — same 1-inclusive +
 # 2-exclusive scheme as the Colab notebook.
 #
-# CLI contract is identical to segment_wing.py (HF transformers
-# version) so both images are drop-in interchangeable:
+# This is the MANUAL-point alternative. The automatic YOLOv8 -> SAM3
+# pipeline uses segment_wing.py / Dockerfile.segment:
 #   python3 segment_wing_github.py <image> --points points.json \
 #       [--out out.csv] [--device auto|cpu|cuda] [--masks-dir DIR]
 #

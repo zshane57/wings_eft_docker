@@ -7,8 +7,8 @@
 #   docker build --platform linux/amd64 -f Dockerfile.workflow -t flywing-workflow .
 #
 # Run:
-#   docker run --rm flywing-workflow \
-#       ./run_workflow.sh contours_coordinates_cvicina.csv C.vicina
+#   docker run --rm --platform linux/amd64 flywing-workflow \
+#       contours_coordinates_bkarnyi.csv B.karnyi
 # --------------------------------------------------------------
 
 FROM ubuntu:22.04
@@ -67,8 +67,13 @@ RUN cd /usr/local/bin \
     && ls -la /usr/local/bin/guide
 
 # ---- 4. R packages: Posit binary repo (jammy) + Momocs from GitHub ----
+# Posit selects Linux binaries from the R-specific user agent. Without it,
+# a fresh build can silently compile sf/s2 and their C++ dependencies from
+# source for tens of minutes (especially under amd64 emulation).
 RUN Rscript -e " \
-  options(repos = c(CRAN = 'https://packagemanager.posit.co/cran/__linux__/jammy/latest')); \
+  options(repos = c(CRAN = 'https://packagemanager.posit.co/cran/__linux__/jammy/latest'), \
+          HTTPUserAgent = sprintf('R (%s)', paste(getRversion(), \
+              R.version[['platform']], R.version[['arch']], R.version[['os']]))); \
   install.packages(c('remotes', 'optparse', 'sf', 's2', 'ape', 'jpeg', \
                      'ggplot2', 'plotly', 'rgl', 'htmlwidgets', 'fs')); \
   remotes::install_github('MomX/Momocs', upgrade = 'never'); \
@@ -92,4 +97,4 @@ RUN chmod +x /app/run_workflow.sh \
 
 # ---- 6. Default entrypoint ----
 ENTRYPOINT ["/app/run_workflow.sh"]
-CMD ["contours_coordinates_cvicina.csv", "C.vicina"]
+CMD ["contours_coordinates_bkarnyi.csv", "B.karnyi"]

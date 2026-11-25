@@ -16,7 +16,8 @@
 # Writes qc_overlay_<cell>.png: the photo with
 #   yellow  = SAM3-produced boundary
 #   magenta = reference boundary (only with --known)
-#   green/red dots = prompt points
+#   cyan boxes = YOLOv8 detections (automatic mode)
+#   green/red dots = prompt points (manual fallback)
 # --------------------------------------------------------------
 import argparse
 import json
@@ -31,7 +32,9 @@ ap.add_argument("--masks-dir", default=None,
                 help="directory with mask_pa2r.png / mask_dm.png "
                      "(default: masks_<photo stem>)")
 ap.add_argument("--prompts", default=None,
-                help="points JSON (default: _prompts_<stem>.json if present)")
+                help="manual points JSON (default: _prompts_<stem>.json if present)")
+ap.add_argument("--detections", default=None,
+                help="YOLO detection JSON; draws boxes and suppresses stale default prompts")
 ap.add_argument("--known", default=None,
                 help="reference contour CSV for the IoU check (optional)")
 args = ap.parse_args()
@@ -48,10 +51,17 @@ if photo is None:
 H, W = photo.shape[:2]
 
 prompts = None
-if os.path.isfile(prompts_path):
+if args.prompts and os.path.isfile(prompts_path):
+    prompts = json.load(open(prompts_path))
+elif not args.detections and os.path.isfile(prompts_path):
     prompts = json.load(open(prompts_path))
 else:
-    print(f"(no prompts file '{prompts_path}' - skipping point checks)")
+    print(f"(no manual prompts file '{prompts_path}' - skipping point checks)")
+
+detections = None
+if args.detections:
+    with open(args.detections) as handle:
+        detections = json.load(handle).get("boxes", {})
 
 known = None
 if known_path and os.path.isfile(known_path):
@@ -118,6 +128,13 @@ for cell in ("pa2r", "dm"):
 
     # ---- overlay ----------------------------------------------------------
     ov = photo.copy()
+    detection = detections.get(cell) if detections else None
+    if detection:
+        x1, y1, x2, y2 = [int(round(v)) for v in detection["xyxy"]]
+        cv2.rectangle(ov, (x1, y1), (x2, y2), (255, 255, 0), 3)  # YOLO: cyan
+        cv2.putText(ov, f"YOLO {cell} {detection['confidence']:.2f}",
+                    (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65, (255, 255, 0), 2)
     cv2.drawContours(ov, c, -1, (0, 255, 255), 3)              # produced: yellow
     if known is not None:
         cv2.polylines(ov, [poly], True, (255, 0, 255), 3)      # reference: magenta
@@ -133,6 +150,9 @@ for cell in ("pa2r", "dm"):
     print(f"\n--- {cell} ---")
     print(f"  components   : {comps} (largest {biggest} px, {100*fill:.1f}% of mask)")
     print(f"  bounding box : x={x} y={y} w={w} h={h}")
+    if detection:
+        print(f"  YOLO box     : {detection['xyxy']} "
+              f"(confidence {detection['confidence']:.4f})")
     print(f"  solidity     : {solidity:.3f}")
     if inside:
         print(f"  points inside: {inside}")

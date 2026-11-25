@@ -1,4 +1,4 @@
-# Fly Wing Species Identification — Docker Workflow (Web Launcher GUI)
+# Fly Wing Species Identification — Docker Workflow (full pipeline)
 
 Self-contained deployment of the complete pipeline — segmentation **and**
 classification — in two chained Docker containers, driven by a browser
@@ -6,7 +6,8 @@ page. For a terminal-only workflow, use the sibling `docker_workflow/`
 package (same images, command-line launchers) instead:
 
 ```
-wing photo  →  SAM3 segmentation (point prompts)  →  contour CSV
+wing photo  →  orientation alignment  →  YOLOv8 boxes  →  SAM3 segmentation
+            →  contour CSV
             →  EFD (10 harmonics, Momocs)  →  scale/rotate/phase normalisation
             →  traversal-direction canonicalisation  →  fold-1 LDA projection (24 features)
             →  full GUIDE data file  →  GUIDE random forest  →  species + probability
@@ -43,20 +44,33 @@ Flask container (~325 MB) and opens the workflow in your browser:
 
 The page offers two modes:
 
-- **Segment a wing photo, then identify it** — upload the photo, click the
-  6 prompt points directly on the image (green inside + 2 red outside,
-  per cell, with undo/reset), optionally paste the HF token (needed only
-  for the first weights download), pick the species, and press **Run**.
-  The log streams live; when the run finishes the result card shows the
-  prediction together with the **QC overlay images** (yellow = SAM3
-  boundary) and download links for the contour CSV.
+- **Segment a wing photo, then identify it** — upload the photo and press
+  **Run**. The image is EXIF-corrected and put into the upright-landscape
+  training orientation; YOLOv8 then detects `pa2r` and `dm` at **imgsz=1024,
+  conf=0.5**. The highest-confidence box per class becomes a native SAM3
+  bounding-box prompt. No clicks are needed. Optionally paste the HF token
+  (needed only for the first SAM3 weights download) and pick the species.
+  If either cell is missing, the image is skipped cleanly, a warning names
+  the photo and missing cell, and the browser opens the original six-point
+  **manual prompt fallback**. The result card includes QC overlays (yellow =
+  SAM3 boundary, cyan = YOLOv8 box) and detection-JSON download links.
 - **Classify an existing contour CSV** — upload a `contours_coordinates*.csv`
   and run.
 
-Segmentation runs also write `masks_<photo>/` (the segmented cells), save the
-clicked points as `_prompts_<photo-stem>.json` (schema below), and produce
-the QC overlays. For deeper checks run `qc_masks.py` (below); if an overlay
-looks wrong, redo the run with better-placed points.
+Both modes add an **EFD coefficients + LDA features CSV** download to the
+result card. `efd_lda_features_<sample>.csv` contains one row with the sample
+metadata, all 80 final normalised EFD coefficients (40 per cell, including
+`a1`, `b1`, and `c1`), and the 24 centred fold-1 LDA features. Coefficient
+columns are prefixed `dm_` or `pa2r_`; LD columns retain the `dm-LD*` and
+`pa2r-LD*` names used by GUIDE. These are the exact values used for the new
+sample's projection, not a reanalysis of the training set.
+
+Automatic runs write `masks_<photo>/` (the segmented cells), the aligned
+photo `_aligned_<photo-stem>.png`, `_detections_<photo-stem>.json` (complete
+or partial boxes and confidences), and the QC overlays. Manual-fallback runs
+save `_prompts_<photo-stem>.json` instead. For deeper checks run `qc_masks.py`
+(below); if an automatic overlay looks wrong, inspect the detection box or
+retry with manual points.
 
 The server drives the same Docker images as the other frontends, binds to
 **localhost only**, passes the token to the container as an environment
@@ -68,9 +82,36 @@ and images after each run. It keeps running until you stop it:
 Requires Docker Desktop or any Docker Engine with the standard
 `/var/run/docker.sock` (all desktop installs have it).
 
-### Prompt-points files
+### Automatic detection files
 
-Every segmentation run saves the clicked points next to the photo as
+Every automatic attempt writes `_detections_<photo-stem>.json`, even when a
+cell is missing. Boxes are pixel `[x_min, y_min, x_max, y_max]` coordinates in
+the aligned image:
+
+```json
+{
+  "image": "B.karnyi.9_cleanup.png",
+  "aligned_image": "_aligned_B.karnyi.9_cleanup.png",
+  "predict": {"imgsz": 1024, "conf": 0.5},
+  "boxes": {
+    "pa2r": {"class_id": 0, "mask_target": "masks5",
+             "xyxy": [1200.0, 220.0, 1660.0, 390.0], "confidence": 0.91},
+    "dm":   {"class_id": 1, "mask_target": "masks9",
+             "xyxy": [900.0, 350.0, 1210.0, 650.0], "confidence": 0.88}
+  },
+  "complete": true
+}
+```
+
+Class **0 = pa2r / masks5** and class **1 = dm / masks9**. If a class produces
+multiple boxes, only the highest-confidence one is retained. YOLO and SAM3
+receive the same EXIF-corrected, RGB, upright-landscape image, so the saved
+coordinates and masks share one coordinate frame. Portrait images are rotated
+90° counter-clockwise; training already includes left/right flips.
+
+### Manual fallback prompt-points files
+
+Every manual-fallback run saves the clicked points next to the photo as
 `_prompts_<photo-stem>.json`:
 
 ```json
@@ -93,9 +134,11 @@ launchers.
   Silicon it runs through Rosetta emulation — enable *Settings → General →
   Use Rosetta for x86_64/amd64 emulation* in Docker Desktop for best speed.
 - The **segmentation image runs natively** on both amd64 and arm64.
-- Measured sizes: classification image **1.9 GB**; segmentation image
-  **1.36 GB** (builds in about a minute thanks to layer caching); SAM3
-  weights **3.4 GB** (one-time download, kept in the Docker volume).
+- The segmentation image contains CPU-only PyTorch, `ultralytics`, SAM3
+  support, and the bundled **6.2 MB YOLOv8 weights**. SAM3 weights are
+  **3.4 GB** (one-time download, kept in the Docker volume). The measured
+  classification image is **1.9 GB**; segmentation-image size depends on the
+  resolved Python dependency versions.
 - A CPU-only segmentation takes minutes per wing cell (comparable to the
   Colab notebook's CPU timing). A CUDA GPU accelerates this dramatically if
   you have one — the container detects it automatically.
@@ -110,14 +153,17 @@ launchers.
 | `webserver.py` + `templates/` + `Dockerfile.web` | Browser frontend (Flask + Docker SDK CLI in a container; served at localhost:8080) |
 | `start_web.sh` / `start_web.ps1` | Launchers for the browser frontend (build the web image, start it, open the page) |
 | `gui_logic.py` | Shared logic for the web server (output parsing, coordinate mapping, points-JSON schema) |
-| `test_gui_logic.py` | Headless unit tests — `python3 test_gui_logic.py` (36 checks) |
-| `segment_wing.py` | SAM3 segmentation entrypoint (Hugging Face transformers port) |
-| `Dockerfile.segment` | Segmentation image (python:3.11-slim, CPU-only PyTorch) |
+| `test_gui_logic.py` | Headless web/pipeline unit tests — `python3 test_gui_logic.py` |
+| `segment_wing.py` | Automatic YOLOv8-box + SAM3 segmentation entrypoint; manual-point fallback |
+| `wing_detection.py` | Image alignment, one-time YOLO loading, best-box selection, clean incomplete-detection guard |
+| `models/yolo_wings_best.pt` | Trained YOLOv8n weights (1024 px; class 0 pa2r/masks5, class 1 dm/masks9) |
+| `test_wing_detection.py` | Dependency-free YOLO contract/fallback tests — `python3 test_wing_detection.py` |
+| `Dockerfile.segment` | Segmentation image (python:3.11-slim, CPU-only PyTorch + ultralytics) |
 | `prompts_bkarnyi9.json` | Example prompt points for `B.karnyi.9_cleanup.png` |
-| `example_clicks.png` | Fallback click-placement example for the web frontend (used until a first run produces `qc_overlay_*.png`; generated by `gen_example.py`) |
+| `example_clicks.png` | Static fallback click-placement illustration for the web frontend (used until a first run produces `qc_overlay_*.png`) |
 | `run_segment_benchmark.sh` | One-shot benchmark/validation run (hidden token prompt, writes the CSV + masks + log) |
-| `qc_masks.py` | Segmentation quality control — structure, prompt-point containment, IoU vs a reference, and QC overlay images. Run inside the segmentation container:
-  `docker run --rm -v "$PWD:/work" -w /work --entrypoint python3 flywing-segment qc_masks.py <photo> [--masks-dir DIR] [--prompts FILE] [--known reference.csv]` |
+| `qc_masks.py` | Segmentation quality control — structure, YOLO boxes or prompt-point containment, IoU vs a reference, and QC overlays. Run inside the segmentation container:
+  `docker run --rm -v "$PWD:/work" -w /work --entrypoint python3 flywing-segment qc_masks.py <photo> [--masks-dir DIR] [--detections FILE] [--prompts FILE] [--known reference.csv]` |
 | `B.karnyi.9_cleanup.png` | Test wing photo (for end-to-end validation) |
 | `segment_wing_github.py` / `Dockerfile.segment_github` | Alternative segmentation image using the **official GitHub SAM3** (see below) |
 | `Dockerfile.workflow` | Classification image (ubuntu:22.04, R, Momocs 1.5.0, GUIDE) |
@@ -126,14 +172,15 @@ launchers.
 | `lda_loadings_fold_1_{dm,pa2r}.txt`, `mean_ld_train_fd_1_{dm,pa2r}.rds` | Fold-1 LDA model pieces |
 | `dm_testing.csv`, `pa2r_testing.csv` | Fold-1 testing set (130 samples) |
 | `guide_input/…` | GUIDE base data, command file, variable description |
-| `contours_coordinates*.csv` | Contour samples — ALL matching files are baked into the classification image at build time |
+| `contours_coordinates_bkarnyi.csv` | Bundled classification sample; any additional `contours_coordinates*.csv` files are also baked into the classification image at build time |
 
 ## Alternative: official GitHub SAM3 implementation
 
 The default segmentation image uses the **Hugging Face transformers port**
 of SAM3 — the exact code path of the Colab notebook. `Dockerfile.segment_github`
-builds a drop-in alternative from **https://github.com/facebookresearch/sam3**
-(point prompts via its SAM1/SAM2-style interactive predictor):
+builds a manual-point alternative from **https://github.com/facebookresearch/sam3**
+(point prompts via its SAM1/SAM2-style interactive predictor). The automatic
+YOLOv8 web pipeline uses the default `Dockerfile.segment` image:
 
 - same gated checkpoint (`facebook/sam3`) — **the same HF token works**;
 - bigger image (≈ 2.3 GB) and needs a one-line CPU patch applied at build
@@ -153,7 +200,10 @@ Classification (GUIDE is x86_64-only — use the amd64 platform on Apple Silicon
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.workflow -t flywing-workflow .
-docker run --rm --platform linux/amd64 flywing-workflow contours_coordinates_bkarnyi.csv B.karnyi
+docker run --rm --platform linux/amd64 -v "$PWD:/work" \
+  -e FEATURE_CSV=/work/efd_lda_features_bkarnyi.csv \
+  flywing-workflow contours_coordinates_bkarnyi.csv B.karnyi
+# The combined EFD/LDA export is now ./efd_lda_features_bkarnyi.csv
 ```
 
 Segmentation (native architecture, weights volume, first run downloads):
@@ -162,8 +212,19 @@ Segmentation (native architecture, weights volume, first run downloads):
 docker build -f Dockerfile.segment -t flywing-segment .
 docker run --rm -v "$PWD:/work" -w /work \
   -v flywing-sam3-cache:/root/.cache/huggingface -e HF_TOKEN=… \
-  flywing-segment B.karnyi.9_cleanup.png --points prompts_bkarnyi9.json \
+  flywing-segment B.karnyi.9_cleanup.png \
   --out contours_coordinates_B.karnyi.9.csv --masks-dir masks_bkarnyi9
+```
+
+If YOLOv8 cannot find both cells, inspect `_detections_*.json` and rerun that
+photo with manual points:
+
+```bash
+docker run --rm -v "$PWD:/work" -w /work \
+  -v flywing-sam3-cache:/root/.cache/huggingface -e HF_TOKEN=… \
+  flywing-segment B.karnyi.9_cleanup.png --prompt-mode manual \
+  --points prompts_bkarnyi9.json --out contours_coordinates_B.karnyi.9.csv \
+  --masks-dir masks_bkarnyi9
 ```
 
 ## Clean up
@@ -176,5 +237,6 @@ server (`flywing-web`) keeps running until you stop it with
 - the **build cache** (fast rebuilds) — free with `docker builder prune`;
 - the **weights volume** `flywing-sam3-cache` (avoid re-downloading 3.4 GB) —
   free with `docker volume rm flywing-sam3-cache`;
-- your samples and the small QC artifacts (`contours_coordinates*.csv`,
-  `masks_*/`, `_prompts_*.json`).
+- your samples and the small QC/feature artifacts (`contours_coordinates*.csv`,
+  `efd_lda_features_*.csv`, `masks_*/`, `_detections_*.json`,
+  `_aligned_*.png`, `_prompts_*.json`).
