@@ -63,8 +63,8 @@
 <body>
 <div class="wrap">
   <h1>Forensic Fly Wing Species Identification</h1>
-  <div class="sub">SAM3 segmentation &rarr; EFD/LDA features &rarr; GUIDE random
-    forest &mdash; everything runs in Docker on your machine.</div>
+  <div class="sub">YOLOv8 cell detection + SAM3 segmentation &rarr; EFD/LDA
+    features &rarr; GUIDE random forest &mdash; everything runs in Docker on your machine.</div>
 
   <!-- ============================ input ============================ -->
   <div class="card">
@@ -79,7 +79,15 @@
         <label>Wing photo</label>
         <input type="file" id="photo" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp"
                onchange="uploadPhoto(this)">
-        <span class="hint" id="photoHint">PNG/JPEG, the two cells fully visible</span>
+        <span class="hint" id="photoHint">PNG/JPEG; YOLOv8 detects pa2r + dm automatically</span>
+      </div>
+      <div class="row">
+        <label>Cell prompting</label>
+        <label style="min-width:0;color:#222">
+          <input type="checkbox" id="manualMode" onchange="toggleManualMode()">
+          Manual prompt fallback
+        </label>
+        <span class="hint">Automatic: YOLOv8 at 1024 px, confidence &ge; 0.5</span>
       </div>
       <div id="picker" class="hidden">
         <div class="hint" style="text-align:center;margin-bottom:2px">
@@ -161,6 +169,7 @@
 const SPECIES = {{ species | tojson }};
 const UNKNOWN = SPECIES[0];
 let mode = 1, photo = null, csv = null, running = false;
+let manualMode = false;
 let points = {pa2r: [], dm: []};
 let stageIdx = 0;                    // 0 = pa2r, 1 = dm
 const STAGES = ["pa2r", "dm"];
@@ -195,7 +204,9 @@ async function uploadPhoto(input) {
   photo = j.name; csv = null;
   $("photoHint").innerHTML = "<span class='ok'>\u2713 " + photo + "</span>";
   loadCanvas(photo);
-  $("picker").classList.remove("hidden");
+  manualMode = false;
+  $("manualMode").checked = false;
+  $("picker").classList.add("hidden");
   points = {pa2r: [], dm: []}; stageIdx = 0;
   updateStage();
 }
@@ -211,6 +222,17 @@ async function uploadCsv(input) {
   csv = j.name; photo = null;
   $("csvHint").innerHTML = "<span class='ok'>\u2713 " + csv + "</span>";
   refreshRunState();
+}
+
+function toggleManualMode() {
+  manualMode = $("manualMode").checked;
+  $("picker").classList.toggle("hidden", !manualMode);
+  if (manualMode) {
+    loadCanvas(photo);
+    updateStage();
+  } else {
+    refreshRunState();
+  }
 }
 
 // ---------------------------------------------------------------- canvas
@@ -275,13 +297,15 @@ function pointsComplete() {
 
 function refreshRunState() {
   const ok = !running && (mode === 1
-    ? !!(photo && pointsComplete())
+    ? !!(photo && (!manualMode || pointsComplete()))
     : !!csv);
   $("btnRun").disabled = !ok;
   $("runHint").textContent = running ? ""
-    : (mode === 1 && photo && !pointsComplete())
-      ? "click the 6 prompt points on the photo first"
-      : "";
+    : (mode === 1 && photo && manualMode && !pointsComplete())
+      ? "click the 6 fallback prompt points on the photo first"
+      : (mode === 1 && photo && !manualMode)
+        ? "ready — YOLOv8 will locate both cells automatically"
+        : "";
 }
 
 // ---------------------------------------------------------------- run + poll
@@ -291,7 +315,8 @@ async function run() {
   if (payload.species === UNKNOWN) payload.species = "";
   if (mode === 1) {
     payload.photo = photo;
-    payload.points = points_json();
+    payload.prompt_mode = manualMode ? "manual" : "auto";
+    if (manualMode) payload.points = points_json();
   } else {
     payload.csv = csv;
   }
@@ -324,6 +349,12 @@ async function poll() {
   clearInterval(timer); running = false; refreshRunState();
   if (j.state === "error") {
     $("phase").textContent = "failed";
+    if (j.error_code === "detection_incomplete" && mode === 1 && photo) {
+      $("manualMode").checked = true;
+      toggleManualMode();
+      $("runHint").textContent =
+        "automatic detection incomplete — click the 6 fallback points, then run again";
+    }
     alert("Run failed: " + (j.error || "see the log"));
     return;
   }
@@ -350,8 +381,9 @@ function showResult(j) {
   const a = j.artifacts || {};
   if (a.overlay_pa2r || a.overlay_dm) {
     $("overlays").innerHTML =
-      "<div class='hint'>Segmentation QC overlays (yellow = SAM3 "
-      + "boundary, green/red = your clicks)</div>" +
+      "<div class='hint'>Segmentation QC overlays (yellow = SAM3 boundary; "
+      + (a.detections ? "cyan = YOLOv8 boxes" : "green/red = manual clicks")
+      + ")</div>" +
       [["overlay_pa2r", "pa<sub>2</sub>r cell"], ["overlay_dm", "dm cell"]]
         .map(([k, lab]) => a[k]
           ? "<figure><img src='/files/" + a[k] + "?t=" + Date.now() +
@@ -360,6 +392,9 @@ function showResult(j) {
   } else { $("overlays").innerHTML = ""; }
   const links = [];
   if (a.csv) links.push("<a href='/files/" + a.csv + "?download'>contour CSV</a>");
+  if (a.features_csv) links.push("<a href='/files/" + a.features_csv + "?download'>EFD coefficients + LDA features CSV</a>");
+  if (a.detections) links.push("<a href='/files/" + a.detections + "?download'>YOLO detections JSON</a>");
+  if (a.aligned_image) links.push("<a href='/files/" + a.aligned_image + "?download'>aligned image</a>");
   if (a.overlay_pa2r) links.push("<a href='/files/qc_overlay_pa2r.png?download'>overlay pa<sub>2</sub>r</a>");
   if (a.overlay_dm) links.push("<a href='/files/qc_overlay_dm.png?download'>overlay dm</a>");
   $("artifacts").innerHTML = links.join(" &middot; ");
